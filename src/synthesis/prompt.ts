@@ -7,7 +7,8 @@ Input format
 - The user message contains a module header (name, paths, Bugzilla components, owners, peers) followed by a corpus of recent Phabricator review comments grouped by bug and revision.
 
 Output format
-- Pure markdown. Begin with YAML frontmatter containing \`name\` (the slug provided by the user, with \`-review\` appended) and \`description\` (a single sentence describing the skill).
+- Pure markdown. Do not wrap the output in a fenced code block (no leading \`\`\`markdown).
+- Begin with YAML frontmatter containing \`name\` (the slug provided by the user, with \`-review\` appended) and \`description\` (a single sentence describing the skill).
 - After frontmatter, the following sections in this order:
   1. **Module Scope** — paths and Bugzilla components verbatim from the header.
   2. **Core Reviewers** — owners and peers from the header.

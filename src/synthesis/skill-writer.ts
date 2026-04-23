@@ -9,14 +9,21 @@ export interface WriteSkillOptions {
   outputDir: string;
 }
 
+const FENCE_PATTERN = /^```[a-z]*\n([\S\s]*?)\n```\s*$/i;
+
+const stripOuterFence = (markdown: string): string => {
+  const match = FENCE_PATTERN.exec(markdown.trim());
+  return match ? (match[1] ?? markdown) : markdown;
+};
+
 const ensureFrontmatter = (
   markdown: string,
   slug: ModuleSlug,
   name: ModuleName,
 ): string => {
-  const trimmed = markdown.trimStart();
-  if (trimmed.startsWith("---\n")) {
-    return trimmed;
+  const unwrapped = stripOuterFence(markdown).trimStart();
+  if (unwrapped.startsWith("---\n")) {
+    return unwrapped;
   }
   const frontmatter = [
     "---",
@@ -25,7 +32,7 @@ const ensureFrontmatter = (
     "---",
     "",
   ].join("\n");
-  return `${frontmatter}\n${trimmed}`;
+  return `${frontmatter}\n${unwrapped}`;
 };
 
 export const writeSkill = async (

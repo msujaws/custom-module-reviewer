@@ -114,4 +114,30 @@ describe("retryingFetcher", () => {
       wrapped({ method: "GET", url: "https://x" }),
     ).rejects.toThrow(/404/);
   });
+
+  test("on 429 without Retry-After, backs off a full 30 minutes", async () => {
+    let call = 0;
+    const sleeps: number[] = [];
+    const inner: FetchFn = async () => {
+      call += 1;
+      if (call === 1) {
+        return {
+          status: 429,
+          headers: {},
+          body: "",
+          fetchedAt: 0,
+        };
+      }
+      return ok("ok");
+    };
+    const wrapped = retryingFetcher(inner, {
+      retries: 2,
+      baseDelayMs: 10,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+    });
+    await wrapped({ method: "GET", url: "https://x" });
+    expect(sleeps).toEqual([30 * 60 * 1000]);
+  });
 });

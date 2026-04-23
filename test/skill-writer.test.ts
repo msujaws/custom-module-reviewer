@@ -48,6 +48,20 @@ describe("writeSkill", () => {
     expect(contents).toContain("Body text");
   });
 
+  test("strips an outer ```markdown fence and keeps Claude's frontmatter", async () => {
+    const skillPath = await writeSkill({
+      markdown: "```markdown\n---\nname: url-bar-review\ndescription: Claude-authored specific description\n---\n\nBody text\n```",
+      moduleSlug: slug,
+      moduleName: name,
+      outputDir: outDir,
+    });
+    const contents = readFileSync(skillPath, "utf8");
+    expect(contents.startsWith("---\n")).toBe(true);
+    expect(contents).toContain("Claude-authored specific description");
+    expect(contents).not.toContain("```markdown");
+    expect(contents).not.toContain("Module-specific code review guidance");
+  });
+
   test("does not double-add frontmatter when one is already present", async () => {
     const markdown =
       "---\nname: url-bar-review\ndescription: Something specific\n---\n\nBody";

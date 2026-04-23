@@ -6,6 +6,8 @@ import {
   type RetryOptions,
 } from "./retry.ts";
 
+const DEFAULT_429_COOLDOWN_SECONDS = 30 * 60;
+
 export const realFetcher: FetchFn = async (
   request: CacheRequest,
 ): Promise<CachedResponse> => {
@@ -52,10 +54,14 @@ export const retryingFetcher = (
     withRetry(async () => {
       const response = await inner(request);
       if (response.status === 429 || response.status >= 500) {
-        const retryAfterSeconds = parseRetryAfter(
+        const headerSeconds = parseRetryAfter(
           response.headers["retry-after"],
           Date.now(),
         );
+        const retryAfterSeconds =
+          response.status === 429
+            ? headerSeconds ?? DEFAULT_429_COOLDOWN_SECONDS
+            : headerSeconds;
         throw new RetryableError(
           `HTTP ${response.status} on ${request.url}`,
           retryAfterSeconds,
