@@ -8,6 +8,24 @@ export class RetryableError extends Error {
   }
 }
 
+export const parseRetryAfter = (
+  header: string | undefined,
+  now: number,
+): number | undefined => {
+  if (!header) {
+    return undefined;
+  }
+  const numeric = Number(header);
+  if (Number.isFinite(numeric) && numeric >= 0) {
+    return numeric;
+  }
+  const httpDate = Date.parse(header);
+  if (Number.isFinite(httpDate)) {
+    return Math.max(0, (httpDate - now) / 1000);
+  }
+  return undefined;
+};
+
 export interface RetryOptions {
   retries?: number;
   baseDelayMs?: number;

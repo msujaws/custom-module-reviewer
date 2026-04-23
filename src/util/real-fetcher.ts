@@ -1,5 +1,10 @@
 import type { CacheRequest, CachedResponse, FetchFn } from "./http-cache.ts";
-import { RetryableError, withRetry, type RetryOptions } from "./retry.ts";
+import {
+  RetryableError,
+  parseRetryAfter,
+  withRetry,
+  type RetryOptions,
+} from "./retry.ts";
 
 export const realFetcher: FetchFn = async (
   request: CacheRequest,
@@ -47,13 +52,13 @@ export const retryingFetcher = (
     withRetry(async () => {
       const response = await inner(request);
       if (response.status === 429 || response.status >= 500) {
-        const retryAfterHeader = response.headers["retry-after"];
-        const retryAfterSeconds = retryAfterHeader
-          ? Number(retryAfterHeader)
-          : undefined;
+        const retryAfterSeconds = parseRetryAfter(
+          response.headers["retry-after"],
+          Date.now(),
+        );
         throw new RetryableError(
           `HTTP ${response.status} on ${request.url}`,
-          Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : undefined,
+          retryAfterSeconds,
         );
       }
       if (response.status >= 400) {

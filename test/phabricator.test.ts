@@ -201,3 +201,75 @@ describe("fetchRevisionComments", () => {
     );
   });
 });
+
+describe("rate-limit throttling", () => {
+  test("enforces a minimum interval between network calls when throttleState is provided", async () => {
+    const sleeps: number[] = [];
+    let clock = 1000;
+    const { fetchFn } = recorder(() =>
+      jsonResponse({
+        result: { data: [], cursor: { after: null } },
+        error_code: null,
+      }),
+    );
+    const { createThrottleState } = await import(
+      "../src/sources/phabricator.ts"
+    );
+    const client: PhabricatorClient = {
+      fetchFn,
+      apiToken: "tok",
+      throttleState: createThrottleState(),
+      minIntervalMs: 5000,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        clock += ms;
+      },
+      now: () => clock,
+    };
+    await resolveRevisionsByIds(client, [
+      unsafeBrand<DNumber>(1),
+    ]);
+    await resolveRevisionsByIds(client, [
+      unsafeBrand<DNumber>(2),
+    ]);
+    expect(sleeps).toEqual([5000]);
+  });
+
+  test("emits a cooldown sleep after every N transaction.search calls", async () => {
+    const sleeps: number[] = [];
+    let clock = 0;
+    const { fetchFn } = recorder(() =>
+      jsonResponse({
+        result: { data: [], cursor: { after: null } },
+        error_code: null,
+      }),
+    );
+    const { createThrottleState } = await import(
+      "../src/sources/phabricator.ts"
+    );
+    const client: PhabricatorClient = {
+      fetchFn,
+      apiToken: "tok",
+      throttleState: createThrottleState(),
+      minIntervalMs: 1,
+      txCooldownEvery: 3,
+      txCooldownMs: 999_999,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+        clock += ms;
+      },
+      now: () => clock,
+    };
+    const revisionTemplate = {
+      dNumber: unsafeBrand<DNumber>(1),
+      phid: unsafeBrand<RevisionPHID>("PHID-DREV-1"),
+      title: "t",
+      authorPHID: unsafeBrand<UserPHID>("PHID-USER-author"),
+      url: "https://phab/D1",
+    };
+    for (let i = 0; i < 5; i += 1) {
+      await fetchRevisionComments(client, revisionTemplate);
+    }
+    expect(sleeps.filter((ms) => ms === 999_999)).toHaveLength(1);
+  });
+});

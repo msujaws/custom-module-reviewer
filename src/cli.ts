@@ -24,6 +24,7 @@ import {
   type BugzillaClient,
 } from "./sources/bugzilla.ts";
 import {
+  createThrottleState,
   fetchRevisionComments,
   resolveRevisionsByIds,
   type PhabricatorClient,
@@ -77,7 +78,11 @@ export const run = async (argv: string[]): Promise<number> => {
   const cli = parseOptions(argv);
   const env = loadEnv(process.env, { dryRun: cli.dryRun });
 
-  const fetchFn = retryingFetcher(realFetcher);
+  const fetchFn = retryingFetcher(realFetcher, {
+    retries: 10,
+    baseDelayMs: 2000,
+    maxDelayMs: 180_000,
+  });
   const cacheBase = { cacheDir: CACHE_DIR, mode: cli.cacheMode, fetchFn };
 
   const motsCache: CacheOptions = { ...cacheBase, ttlMs: 6 * HOUR_MS };
@@ -152,6 +157,13 @@ export const run = async (argv: string[]): Promise<number> => {
   const phabricatorClient: PhabricatorClient = {
     fetchFn,
     apiToken: env.PHABRICATOR_API_TOKEN,
+    cache: { cacheDir: CACHE_DIR, mode: cli.cacheMode, ttlMs: 24 * HOUR_MS },
+    throttleState: createThrottleState(),
+    onCooldown: (durationMs, callsSoFar) => {
+      process.stderr.write(
+        `  Proactive cooldown: ${Math.round(durationMs / 1000)}s after ${callsSoFar} transaction.search calls.\n`,
+      );
+    },
   };
 
   process.stderr.write("Resolving revisions...\n");
@@ -161,7 +173,7 @@ export const run = async (argv: string[]): Promise<number> => {
   );
   process.stderr.write(`  ${revisionMap.size} revision(s) resolved.\n`);
 
-  const commentLimit = pLimit(cli.concurrency);
+  const commentLimit = pLimit(1);
   process.stderr.write("Fetching comments...\n");
   const commentList = await Promise.all(
     [...revisionMap.values()].map((rev) =>

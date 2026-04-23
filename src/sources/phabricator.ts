@@ -5,16 +5,89 @@ import {
   type RevisionPHID,
   type UserPHID,
 } from "../util/brand.ts";
-import type { FetchFn } from "../util/http-cache.ts";
+import {
+  cachedFetch,
+  type CacheOptions,
+  type FetchFn,
+} from "../util/http-cache.ts";
 
 export const PHABRICATOR_BASE_URL =
   "https://phabricator.services.mozilla.com/api";
+
+export const DEFAULT_MIN_INTERVAL_MS = 5000;
+export const DEFAULT_TX_COOLDOWN_EVERY = 50;
+export const DEFAULT_TX_COOLDOWN_MS = 30 * 60 * 1000;
+
+export interface ThrottleState {
+  nextAllowedAt: number;
+  transactionSearchCalls: number;
+}
+
+export const createThrottleState = (): ThrottleState => ({
+  nextAllowedAt: 0,
+  transactionSearchCalls: 0,
+});
 
 export interface PhabricatorClient {
   fetchFn: FetchFn;
   apiToken: string;
   baseUrl?: string;
+  cache?: Omit<CacheOptions, "fetchFn">;
+  throttleState?: ThrottleState;
+  minIntervalMs?: number;
+  txCooldownEvery?: number;
+  txCooldownMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+  onCooldown?: (durationMs: number, callsSoFar: number) => void;
 }
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+
+const throttleBeforeNetworkCall = async (
+  client: PhabricatorClient,
+  method: string,
+): Promise<void> => {
+  if (!client.throttleState) {
+    return;
+  }
+  const sleep = client.sleep ?? defaultSleep;
+  const now = client.now ?? Date.now;
+  const minIntervalMs = client.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS;
+  const cooldownEvery = client.txCooldownEvery ?? DEFAULT_TX_COOLDOWN_EVERY;
+  const cooldownMs = client.txCooldownMs ?? DEFAULT_TX_COOLDOWN_MS;
+
+  if (
+    method === "transaction.search" &&
+    client.throttleState.transactionSearchCalls > 0 &&
+    client.throttleState.transactionSearchCalls % cooldownEvery === 0
+  ) {
+    client.onCooldown?.(
+      cooldownMs,
+      client.throttleState.transactionSearchCalls,
+    );
+    await sleep(cooldownMs);
+  }
+
+  const waitMs = client.throttleState.nextAllowedAt - now();
+  if (waitMs > 0) {
+    await sleep(waitMs);
+  }
+  client.throttleState.nextAllowedAt = now() + minIntervalMs;
+  if (method === "transaction.search") {
+    client.throttleState.transactionSearchCalls += 1;
+  }
+};
+
+const throttledFetchFn =
+  (client: PhabricatorClient, method: string): FetchFn =>
+  async (request) => {
+    await throttleBeforeNetworkCall(client, method);
+    return client.fetchFn(request);
+  };
 
 const ConduitEnvelopeSchema = z.object({
   result: z.unknown(),
@@ -101,12 +174,16 @@ const conduitPost = async (
   params: Record<string, string>,
 ): Promise<unknown> => {
   const baseUrl = client.baseUrl ?? PHABRICATOR_BASE_URL;
-  const response = await client.fetchFn({
-    method: "POST",
+  const request = {
+    method: "POST" as const,
     url: `${baseUrl}/${method}`,
     body: { "api.token": client.apiToken, ...params },
     headers: { "content-type": "application/x-www-form-urlencoded" },
-  });
+  };
+  const fetchFn = throttledFetchFn(client, method);
+  const response = client.cache
+    ? await cachedFetch(request, { ...client.cache, fetchFn })
+    : await fetchFn(request);
   const envelope = ConduitEnvelopeSchema.parse(JSON.parse(response.body));
   if (envelope.error_code) {
     throw new Error(

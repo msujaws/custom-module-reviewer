@@ -30,8 +30,8 @@ const BugSchema = z.object({
   product: z.string(),
   component: z.string(),
   resolution: z.string(),
-  last_change_time: z.string().optional(),
-  cf_last_resolved: z.string().optional(),
+  last_change_time: z.string().nullable().optional(),
+  cf_last_resolved: z.string().nullable().optional(),
 });
 
 const BugSearchResponseSchema = z.object({
@@ -119,7 +119,7 @@ export const searchFixedBugs = async (
       product: b.product,
       component: b.component,
       resolution: b.resolution,
-      lastChangeTime: b.last_change_time,
+      lastChangeTime: b.last_change_time ?? undefined,
     }));
   };
 

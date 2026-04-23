@@ -1,5 +1,34 @@
 import { describe, test, expect } from "bun:test";
-import { RetryableError, withRetry } from "../src/util/retry.ts";
+import {
+  RetryableError,
+  parseRetryAfter,
+  withRetry,
+} from "../src/util/retry.ts";
+
+describe("parseRetryAfter", () => {
+  const now = Date.parse("2026-04-23T00:00:00Z");
+
+  test("parses integer seconds", () => {
+    expect(parseRetryAfter("42", now)).toBe(42);
+    expect(parseRetryAfter("0", now)).toBe(0);
+  });
+
+  test("parses HTTP-date and returns seconds until that moment", () => {
+    const future = new Date(now + 120_000).toUTCString();
+    expect(parseRetryAfter(future, now)).toBe(120);
+  });
+
+  test("returns 0 for a past HTTP-date (never negative)", () => {
+    const past = new Date(now - 10_000).toUTCString();
+    expect(parseRetryAfter(past, now)).toBe(0);
+  });
+
+  test("returns undefined for missing or unparsable headers", () => {
+    expect(parseRetryAfter(undefined, now)).toBeUndefined();
+    expect(parseRetryAfter("", now)).toBeUndefined();
+    expect(parseRetryAfter("not-a-date", now)).toBeUndefined();
+  });
+});
 
 const recordingSleep = () => {
   const delays: number[] = [];
