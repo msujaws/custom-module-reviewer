@@ -157,7 +157,7 @@ export const run = async (argv: string[]): Promise<number> => {
   const phabricatorClient: PhabricatorClient = {
     fetchFn,
     apiToken: env.PHABRICATOR_API_TOKEN,
-    cache: { cacheDir: CACHE_DIR, mode: cli.cacheMode, ttlMs: 24 * HOUR_MS },
+    cache: { cacheDir: CACHE_DIR, mode: cli.cacheMode, ttlMs: 30 * 24 * HOUR_MS },
     throttleState: createThrottleState(),
     onCooldown: (durationMs, callsSoFar) => {
       process.stderr.write(
