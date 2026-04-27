@@ -43,7 +43,7 @@ describe("writeSkill", () => {
     });
     const contents = readFileSync(skillPath, "utf8");
     expect(contents.startsWith("---\n")).toBe(true);
-    expect(contents).toContain("name: url-bar-review");
+    expect(contents).not.toContain("name:");
     expect(contents).toContain('description: Module-specific code review guidance for the URL Bar module.');
     expect(contents).toContain("Body text");
   });

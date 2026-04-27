@@ -16,18 +16,13 @@ const stripOuterFence = (markdown: string): string => {
   return match ? (match[1] ?? markdown) : markdown;
 };
 
-const ensureFrontmatter = (
-  markdown: string,
-  slug: ModuleSlug,
-  name: ModuleName,
-): string => {
+const ensureFrontmatter = (markdown: string, name: ModuleName): string => {
   const unwrapped = stripOuterFence(markdown).trimStart();
   if (unwrapped.startsWith("---\n")) {
     return unwrapped;
   }
   const frontmatter = [
     "---",
-    `name: ${slug}-review`,
     `description: Module-specific code review guidance for the ${name} module.`,
     "---",
     "",
@@ -41,11 +36,7 @@ export const writeSkill = async (
   const skillDir = path.join(options.outputDir, `${options.moduleSlug}-review`);
   await mkdir(skillDir, { recursive: true });
   const skillPath = path.join(skillDir, "SKILL.md");
-  const contents = ensureFrontmatter(
-    options.markdown,
-    options.moduleSlug,
-    options.moduleName,
-  );
+  const contents = ensureFrontmatter(options.markdown, options.moduleName);
   await writeFile(skillPath, contents, "utf8");
   return skillPath;
 };

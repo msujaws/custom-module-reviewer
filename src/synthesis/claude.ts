@@ -1,4 +1,5 @@
 import type { ModuleSlug } from "../util/brand.ts";
+import type { DocBody } from "../sources/firefox-docs.ts";
 import type { ReviewBundle } from "./bundle.ts";
 import { buildPrompt, type BuiltPrompt } from "./prompt.ts";
 
@@ -24,8 +25,9 @@ export const synthesizeSkill = async (
   bundle: ReviewBundle,
   moduleSlug: ModuleSlug,
   create: MessagesCreate,
+  docs: DocBody[] = [],
 ): Promise<string> => {
-  const prompt = buildPrompt(bundle, moduleSlug);
+  const prompt = buildPrompt(bundle, moduleSlug, docs);
   const response = await create({
     model: CLAUDE_MODEL,
     max_tokens: CLAUDE_MAX_TOKENS,

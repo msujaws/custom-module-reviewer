@@ -36,6 +36,7 @@ import {
   downloadBugbugArtifact,
   streamRevisionsMatching,
 } from "./sources/bugbug.ts";
+import { fetchRelevantDocs } from "./sources/firefox-docs.ts";
 import { buildBundle } from "./synthesis/bundle.ts";
 import { synthesizeSkill } from "./synthesis/claude.ts";
 import { writeSkill } from "./synthesis/skill-writer.ts";
@@ -241,6 +242,32 @@ export const run = async (argv: string[]): Promise<number> => {
     return 0;
   }
 
+  process.stderr.write("Resolving Firefox house style references...\n");
+  const corpusPaths: string[] = [];
+  for (const rc of commentsByDNumber.values()) {
+    for (const inline of rc.inline) {
+      if (inline.path) {
+        corpusPaths.push(inline.path);
+      }
+    }
+  }
+  const docs = await fetchRelevantDocs(
+    module_,
+    {
+      cacheDir: CACHE_DIR,
+      mode: cli.cacheMode,
+      ttlMs: 30 * 24 * HOUR_MS,
+      fetchFn,
+    },
+    corpusPaths,
+  );
+  if (docs.length > 0) {
+    const titles = docs.map((d) => d.guide.title).join(", ");
+    process.stderr.write(`  ${docs.length} reference(s): ${titles}\n`);
+  } else {
+    process.stderr.write("  no language-specific references matched.\n");
+  }
+
   if (cli.dryRun) {
     process.stderr.write("--dry-run set; skipping Claude synthesis.\n");
     return 0;
@@ -248,17 +275,22 @@ export const run = async (argv: string[]): Promise<number> => {
 
   process.stderr.write("Calling Claude Opus 4.7...\n");
   const anthropic = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY });
-  const markdown = await synthesizeSkill(bundle, slug, async (params) => {
-    const response = await anthropic.messages.create(
-      params as unknown as Parameters<typeof anthropic.messages.create>[0],
-    );
-    return {
-      content: ((response as { content?: unknown }).content ?? []) as Array<{
-        type: string;
-        text?: string;
-      }>,
-    };
-  });
+  const markdown = await synthesizeSkill(
+    bundle,
+    slug,
+    async (params) => {
+      const response = await anthropic.messages.create(
+        params as unknown as Parameters<typeof anthropic.messages.create>[0],
+      );
+      return {
+        content: ((response as { content?: unknown }).content ?? []) as Array<{
+          type: string;
+          text?: string;
+        }>,
+      };
+    },
+    docs,
+  );
 
   const outPath = await writeSkill({
     markdown,
