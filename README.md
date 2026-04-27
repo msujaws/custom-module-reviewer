@@ -23,11 +23,11 @@ cp .env.example .env   # fill in BUGZILLA_API_KEY, PHABRICATOR_API_TOKEN, ANTHRO
 ## Usage
 
 ```bash
-bun run start --module "DOM: Core & HTML" --days 90
+bun run start --module "DOM: Core & HTML"
 bun run start --module "URL Bar" --days 30 --dry-run   # skip Claude call, just gather data
 ```
 
-Flags: `--module <name>`, `--days <N>` (default 90), `--output-dir <path>` (default `./output`),
+Flags: `--module <name>`, `--days <N>` (default 365), `--output-dir <path>` (default `./output`),
 `--dry-run`, `--no-cache`, `--refresh`, `--concurrency <n>`.
 
 ## Development

@@ -58,7 +58,7 @@ const parseOptions = (argv: string[]): CliOptions => {
   program
     .name("custom-module-reviewer")
     .requiredOption("--module <name>", "Module name or machine_name from mots.yaml")
-    .option("--days <n>", "Lookback window in days", "90")
+    .option("--days <n>", "Lookback window in days", "365")
     .option("--output-dir <path>", "Output directory", "./output")
     .option("--dry-run", "Skip the Claude synthesis step", false)
     .option("--no-cache", "Disable HTTP cache (read+write)")
