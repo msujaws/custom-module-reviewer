@@ -6,9 +6,12 @@ Given a Firefox module name and a lookback window, this CLI:
 
 1. Resolves the module's file path globs and Bugzilla components from `mots.yaml` (mozilla-central).
 2. Finds bugs resolved FIXED in that module's components within the last N days (Bugzilla REST).
-3. Fetches review comments (inline + general) from the attached Phabricator revisions (Conduit API).
-4. Synthesizes a module-specific code review skill via Claude Opus 4.7.
-5. Writes `output/<slug>-review/SKILL.md` — a shareable artifact for team review.
+3. Loads review comments (inline + general) from the [bugbug](https://github.com/mozilla/bugbug) Phabricator revisions archive — a public, pre-aggregated snapshot republished on the 1st and 16th of each month.
+4. Falls back to the live Phabricator Conduit API for any revision missing from — or modified after — the archive snapshot.
+5. Synthesizes a module-specific code review skill via Claude Opus 4.7.
+6. Writes `output/<slug>-review/SKILL.md` — a shareable artifact for team review.
+
+The bugbug archive is ~318 MB (zstd-compressed JSONL) and is cached locally under `.cache/bugbug-revisions.json.zst` with a 14-day TTL. Decompression uses the `zstd` binary (install via `brew install zstd` on macOS).
 
 ## Setup
 

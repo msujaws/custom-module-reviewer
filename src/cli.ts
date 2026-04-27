@@ -30,6 +30,12 @@ import {
   type PhabricatorClient,
   type RevisionComments,
 } from "./sources/phabricator.ts";
+import {
+  bugbugToRevisionComments,
+  classifyByBugbugCoverage,
+  downloadBugbugArtifact,
+  streamRevisionsMatching,
+} from "./sources/bugbug.ts";
 import { buildBundle } from "./synthesis/bundle.ts";
 import { synthesizeSkill } from "./synthesis/claude.ts";
 import { writeSkill } from "./synthesis/skill-writer.ts";
@@ -166,27 +172,55 @@ export const run = async (argv: string[]): Promise<number> => {
     },
   };
 
-  process.stderr.write("Resolving revisions...\n");
-  const revisionMap = await resolveRevisionsByIds(
-    phabricatorClient,
+  process.stderr.write("Downloading bugbug revisions artifact...\n");
+  const artifact = await downloadBugbugArtifact({ cacheDir: CACHE_DIR });
+  process.stderr.write(
+    `  Artifact published ${artifact.publishedAt.toISOString()}.\n`,
+  );
+
+  const wantedIds = new Set(
+    uniqueDNumbers.map((d) => d as unknown as number),
+  );
+  process.stderr.write(
+    `Scanning artifact for ${wantedIds.size} revision(s)...\n`,
+  );
+  const bugbugMatches = await streamRevisionsMatching(
+    artifact.zstPath,
+    wantedIds,
+  );
+  const { covered, needsLive } = classifyByBugbugCoverage(
     uniqueDNumbers,
+    bugbugMatches,
+    artifact.publishedAt,
   );
-  process.stderr.write(`  ${revisionMap.size} revision(s) resolved.\n`);
-
-  const commentLimit = pLimit(1);
-  process.stderr.write("Fetching comments...\n");
-  const commentList = await Promise.all(
-    [...revisionMap.values()].map((rev) =>
-      commentLimit(() => fetchRevisionComments(phabricatorClient, rev)),
-    ),
+  process.stderr.write(
+    `  ${covered.size} covered by bugbug, ${needsLive.length} need live Phabricator fetch.\n`,
   );
 
-  const commentsByDNumber = new Map<number, RevisionComments>(
-    commentList.map((rc) => [
-      rc.revision.dNumber as unknown as number,
-      rc,
-    ]),
-  );
+  const commentsByDNumber = new Map<number, RevisionComments>();
+  for (const [id, rev] of covered) {
+    commentsByDNumber.set(id, bugbugToRevisionComments(rev));
+  }
+
+  if (needsLive.length > 0) {
+    process.stderr.write("Resolving revisions via Phabricator...\n");
+    const revisionMap = await resolveRevisionsByIds(
+      phabricatorClient,
+      needsLive,
+    );
+    process.stderr.write(`  ${revisionMap.size} revision(s) resolved.\n`);
+
+    const commentLimit = pLimit(1);
+    process.stderr.write("Fetching comments...\n");
+    const commentList = await Promise.all(
+      [...revisionMap.values()].map((rev) =>
+        commentLimit(() => fetchRevisionComments(phabricatorClient, rev)),
+      ),
+    );
+    for (const rc of commentList) {
+      commentsByDNumber.set(rc.revision.dNumber as unknown as number, rc);
+    }
+  }
 
   const entries = withAttachments.map(({ bug, dNumbers }) => ({
     bug,
