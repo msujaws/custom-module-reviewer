@@ -41,6 +41,23 @@ const BugbugTransactionSchema = z.object({
   comments: z.array(BugbugCommentSchema).optional().default([]),
 });
 
+const BugbugReviewerAttachmentSchema = z
+  .object({
+    reviewers: z
+      .object({
+        reviewers: z
+          .array(
+            z.object({
+              reviewerPHID: z.string(),
+            }),
+          )
+          .optional()
+          .default([]),
+      })
+      .optional(),
+  })
+  .optional();
+
 const BugbugRevisionSchema = z.object({
   id: z.number(),
   phid: z.string(),
@@ -52,6 +69,7 @@ const BugbugRevisionSchema = z.object({
       dateModified: z.number().optional(),
     })
     .passthrough(),
+  attachments: BugbugReviewerAttachmentSchema,
   transactions: z.array(BugbugTransactionSchema).optional().default([]),
 });
 
@@ -98,6 +116,9 @@ export const parseBugbugLine = (line: string): BugbugRevision | null => {
 export const bugbugToRevisionComments = (
   rev: BugbugRevision,
 ): RevisionComments => {
+  const reviewerPHIDs = (rev.attachments?.reviewers?.reviewers ?? []).map(
+    (r) => r.reviewerPHID,
+  );
   const revision: Revision = {
     dNumber: unsafeBrand<DNumber>(rev.id),
     phid: unsafeBrand<RevisionPHID>(rev.phid),
@@ -105,6 +126,7 @@ export const bugbugToRevisionComments = (
     authorPHID: unsafeBrand<UserPHID>(rev.fields.authorPHID),
     url:
       rev.fields.uri ?? `https://phabricator.services.mozilla.com/D${rev.id}`,
+    reviewerPHIDs,
   };
   const inline: InlineComment[] = [];
   const general: GeneralComment[] = [];

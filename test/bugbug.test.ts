@@ -163,6 +163,28 @@ describe("bugbugToRevisionComments", () => {
       "https://phabricator.services.mozilla.com/D9999",
     );
   });
+
+  test("populates reviewerPHIDs from attachments when present", () => {
+    const rev = makeRevision({
+      attachments: {
+        reviewers: {
+          reviewers: [
+            { reviewerPHID: "PHID-PROJ-group" },
+            { reviewerPHID: "PHID-USER-bob" },
+          ],
+        },
+      },
+    });
+    expect(bugbugToRevisionComments(rev).revision.reviewerPHIDs).toEqual([
+      "PHID-PROJ-group",
+      "PHID-USER-bob",
+    ]);
+  });
+
+  test("defaults reviewerPHIDs to [] when bugbug snapshot omits attachments", () => {
+    const rev = makeRevision();
+    expect(bugbugToRevisionComments(rev).revision.reviewerPHIDs).toEqual([]);
+  });
 });
 
 describe("shouldRefetchLive", () => {

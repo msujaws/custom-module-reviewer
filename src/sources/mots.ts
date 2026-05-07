@@ -88,6 +88,7 @@ export interface Module {
   bugzillaComponents: BugzillaComponent[];
   owners: Person[];
   peers: Person[];
+  reviewGroup: string | null;
 }
 
 export interface MotsDoc {
@@ -124,6 +125,7 @@ const flatten = (entries: RawModuleEntry[]): Module[] => {
           .filter((c): c is BugzillaComponent => c !== null),
         owners: (entry.owners ?? []).map((p) => normalizePerson(p)),
         peers: (entry.peers ?? []).map((p) => normalizePerson(p)),
+        reviewGroup: entry.meta?.review_group ?? null,
       });
     }
     if (entry.submodules?.length) {

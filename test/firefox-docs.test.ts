@@ -23,6 +23,7 @@ const makeModule = (includes: string[]): Module => ({
   bugzillaComponents: [],
   owners: [],
   peers: [],
+  reviewGroup: null,
 });
 
 describe("extensionsFromIncludes", () => {

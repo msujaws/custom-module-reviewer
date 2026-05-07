@@ -27,6 +27,7 @@ modules:
       components:
         - Core::DOM
         - 'Core::DOM: Core & HTML'
+      review_group: dom-core-reviewers
     owners:
       - bmo_id: 101
         name: Alice Owner
@@ -106,6 +107,16 @@ describe("parseMotsYaml", () => {
     const urlBar = doc.modules.find((m) => m.name === "URL Bar")!;
     expect(urlBar.excludes).toEqual([]);
     expect(urlBar.peers).toEqual([]);
+  });
+
+  test("surfaces meta.review_group as Module.reviewGroup", () => {
+    const doc = parseMotsYaml(FIXTURE);
+    const dom = doc.modules.find(
+      (m) => m.name === "Core: Document Object Model",
+    )!;
+    expect(dom.reviewGroup).toBe("dom-core-reviewers");
+    const urlBar = doc.modules.find((m) => m.name === "URL Bar")!;
+    expect(urlBar.reviewGroup).toBeNull();
   });
 });
 

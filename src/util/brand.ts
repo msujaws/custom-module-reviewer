@@ -6,6 +6,7 @@ export type BugId = Brand<number, "BugId">;
 export type DNumber = Brand<number, "DNumber">;
 export type RevisionPHID = Brand<string, "RevisionPHID">;
 export type UserPHID = Brand<string, "UserPHID">;
+export type ProjectPHID = Brand<string, "ProjectPHID">;
 export type ModuleName = Brand<string, "ModuleName">;
 export type ModuleSlug = Brand<string, "ModuleSlug">;
 export type AttachmentId = Brand<number, "AttachmentId">;
