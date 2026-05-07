@@ -2,6 +2,7 @@ import { z } from "zod";
 import {
   unsafeBrand,
   type DNumber,
+  type ProjectPHID,
   type RevisionPHID,
   type UserPHID,
 } from "../util/brand.ts";
@@ -95,6 +96,23 @@ const ConduitEnvelopeSchema = z.object({
   error_info: z.string().nullable().optional(),
 });
 
+const ReviewerAttachmentSchema = z
+  .object({
+    reviewers: z
+      .object({
+        reviewers: z
+          .array(
+            z.object({
+              reviewerPHID: z.string(),
+            }),
+          )
+          .optional()
+          .default([]),
+      })
+      .optional(),
+  })
+  .optional();
+
 const RevisionSchema = z.object({
   id: z.number(),
   phid: z.string(),
@@ -103,6 +121,7 @@ const RevisionSchema = z.object({
     authorPHID: z.string(),
     uri: z.string().optional(),
   }),
+  attachments: ReviewerAttachmentSchema,
 });
 
 const RevisionSearchResultSchema = z.object({
@@ -147,6 +166,7 @@ export interface Revision {
   title: string;
   authorPHID: UserPHID;
   url: string;
+  reviewerPHIDs: string[];
 }
 
 export interface InlineComment {
@@ -202,7 +222,9 @@ export const resolveRevisionsByIds = async (
   const out = new Map<DNumber, Revision>();
   for (let start = 0; start < ids.length; start += BATCH_SIZE) {
     const batch = ids.slice(start, start + BATCH_SIZE);
-    const params: Record<string, string> = {};
+    const params: Record<string, string> = {
+      "attachments[reviewers]": "1",
+    };
     for (const [i, id] of batch.entries()) {
       params[`constraints[ids][${i}]`] = String(id);
     }
@@ -211,17 +233,181 @@ export const resolveRevisionsByIds = async (
     );
     for (const raw of result.data) {
       const dNumber = unsafeBrand<DNumber>(raw.id);
+      const reviewerPHIDs = (raw.attachments?.reviewers?.reviewers ?? []).map(
+        (r) => r.reviewerPHID,
+      );
       out.set(dNumber, {
         dNumber,
         phid: unsafeBrand<RevisionPHID>(raw.phid),
         title: raw.fields.title,
         authorPHID: unsafeBrand<UserPHID>(raw.fields.authorPHID),
         url: raw.fields.uri ?? `https://phabricator.services.mozilla.com/D${raw.id}`,
+        reviewerPHIDs,
       });
     }
   }
   return out;
 };
+
+const ProjectSearchResultSchema = z.object({
+  data: z.array(
+    z.object({
+      phid: z.string(),
+      fields: z
+        .object({
+          slug: z.string().nullable().optional(),
+        })
+        .catchall(z.unknown())
+        .optional(),
+      attachments: z
+        .object({
+          slugs: z
+            .object({
+              slugs: z.array(z.string()).optional().default([]),
+            })
+            .optional(),
+          members: z
+            .object({
+              members: z
+                .array(z.object({ phid: z.string() }))
+                .optional()
+                .default([]),
+            })
+            .optional(),
+        })
+        .optional(),
+    }),
+  ),
+});
+
+export const resolveProjectsBySlugs = async (
+  client: PhabricatorClient,
+  slugs: string[],
+): Promise<Map<string, ProjectPHID>> => {
+  const out = new Map<string, ProjectPHID>();
+  if (slugs.length === 0) {
+    return out;
+  }
+  const params: Record<string, string> = {
+    "attachments[slugs]": "1",
+  };
+  for (const [i, slug] of slugs.entries()) {
+    params[`constraints[slugs][${i}]`] = slug;
+  }
+  const result = ProjectSearchResultSchema.parse(
+    await conduitPost(client, "project.search", params),
+  );
+  const wanted = new Set(slugs);
+  for (const project of result.data) {
+    const phid = unsafeBrand<ProjectPHID>(project.phid);
+    const projectSlugs = new Set<string>();
+    if (project.fields?.slug) {
+      projectSlugs.add(project.fields.slug);
+    }
+    for (const s of project.attachments?.slugs?.slugs ?? []) {
+      projectSlugs.add(s);
+    }
+    for (const s of projectSlugs) {
+      if (wanted.has(s)) {
+        out.set(s, phid);
+      }
+    }
+  }
+  return out;
+};
+
+export interface ProjectInfo {
+  phid: ProjectPHID;
+  memberPHIDs: Set<UserPHID>;
+}
+
+export const resolveProjectInfoBySlug = async (
+  client: PhabricatorClient,
+  slug: string,
+): Promise<ProjectInfo | null> => {
+  const params: Record<string, string> = {
+    "constraints[slugs][0]": slug,
+    "attachments[slugs]": "1",
+    "attachments[members]": "1",
+  };
+  const result = ProjectSearchResultSchema.parse(
+    await conduitPost(client, "project.search", params),
+  );
+  for (const project of result.data) {
+    const projectSlugs = new Set<string>();
+    if (project.fields?.slug) {
+      projectSlugs.add(project.fields.slug);
+    }
+    for (const s of project.attachments?.slugs?.slugs ?? []) {
+      projectSlugs.add(s);
+    }
+    if (!projectSlugs.has(slug)) {
+      continue;
+    }
+    const memberPHIDs = new Set<UserPHID>();
+    for (const m of project.attachments?.members?.members ?? []) {
+      memberPHIDs.add(unsafeBrand<UserPHID>(m.phid));
+    }
+    return {
+      phid: unsafeBrand<ProjectPHID>(project.phid),
+      memberPHIDs,
+    };
+  }
+  return null;
+};
+
+export const searchRevisionsByReviewer = async (
+  client: PhabricatorClient,
+  reviewerPHID: ProjectPHID,
+  sinceDays: number,
+): Promise<Revision[]> => {
+  const sinceUnix = Math.floor(
+    (Date.now() - sinceDays * 86_400_000) / 1000,
+  );
+  const out: Revision[] = [];
+  let after: string | null = null;
+  do {
+    const params: Record<string, string> = {
+      "constraints[reviewerPHIDs][0]": reviewerPHID as unknown as string,
+      "constraints[modifiedStart]": String(sinceUnix),
+      "attachments[reviewers]": "1",
+      "order": "newest",
+      "limit": "100",
+    };
+    if (after) {
+      params["after"] = after;
+    }
+    const result = RevisionSearchResultSchema.parse(
+      await conduitPost(client, "differential.revision.search", params),
+    );
+    for (const raw of result.data) {
+      const reviewerPHIDs = (raw.attachments?.reviewers?.reviewers ?? []).map(
+        (r) => r.reviewerPHID,
+      );
+      out.push({
+        dNumber: unsafeBrand<DNumber>(raw.id),
+        phid: unsafeBrand<RevisionPHID>(raw.phid),
+        title: raw.fields.title,
+        authorPHID: unsafeBrand<UserPHID>(raw.fields.authorPHID),
+        url:
+          raw.fields.uri ??
+          `https://phabricator.services.mozilla.com/D${raw.id}`,
+        reviewerPHIDs,
+      });
+    }
+    after = result.cursor?.after ?? null;
+  } while (after);
+  return out;
+};
+
+export const filterCommentsByAuthors = (
+  rc: RevisionComments,
+  allowedAuthors: Set<UserPHID>,
+): RevisionComments => ({
+  revision: rc.revision,
+  inline: rc.inline.filter((c) => allowedAuthors.has(c.authorPHID)),
+  general: rc.general.filter((c) => allowedAuthors.has(c.authorPHID)),
+});
 
 export const fetchRevisionComments = async (
   client: PhabricatorClient,

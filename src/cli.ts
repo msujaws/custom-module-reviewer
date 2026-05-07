@@ -21,13 +21,20 @@ import {
   searchFixedBugs,
   getAttachments,
   extractPhabricatorDNumbers,
+  type Bug,
   type BugzillaClient,
 } from "./sources/bugzilla.ts";
 import {
   createThrottleState,
   fetchRevisionComments,
+  filterCommentsByAuthors,
+  resolveProjectInfoBySlug,
+  resolveProjectsBySlugs,
   resolveRevisionsByIds,
+  searchRevisionsByReviewer,
   type PhabricatorClient,
+  type ProjectInfo,
+  type Revision,
   type RevisionComments,
 } from "./sources/phabricator.ts";
 import {
@@ -51,9 +58,10 @@ interface CliOptions {
   dryRun: boolean;
   cacheMode: CacheMode;
   concurrency: number;
+  skipBugzilla: boolean;
 }
 
-const parseOptions = (argv: string[]): CliOptions => {
+export const parseOptions = (argv: string[]): CliOptions => {
   const program = new Command();
   program
     .name("custom-module-reviewer")
@@ -63,7 +71,12 @@ const parseOptions = (argv: string[]): CliOptions => {
     .option("--dry-run", "Skip the Claude synthesis step", false)
     .option("--no-cache", "Disable HTTP cache (read+write)")
     .option("--refresh", "Ignore cached entries but write new ones", false)
-    .option("--concurrency <n>", "Parallel API calls", "4");
+    .option("--concurrency <n>", "Parallel API calls", "4")
+    .option(
+      "--skip-bugzilla",
+      "Skip Bugzilla; query Phabricator directly by reviewer group and keep only comments authored by current group members. With this flag, --days is measured against Phabricator revision modification time, not bug close time.",
+      false,
+    );
   program.parse(argv);
   const opts = program.opts();
   const cacheMode: CacheMode = opts.cache === false
@@ -78,6 +91,7 @@ const parseOptions = (argv: string[]): CliOptions => {
     dryRun: Boolean(opts.dryRun),
     cacheMode,
     concurrency: Number.parseInt(opts.concurrency, 10),
+    skipBugzilla: Boolean(opts.skipBugzilla),
   };
 };
 
@@ -109,57 +123,14 @@ export const run = async (argv: string[]): Promise<number> => {
   const module_ = resolved.module;
   const slug = toModuleSlug(unsafeBrand<ModuleName>(module_.name));
 
-  if (module_.bugzillaComponents.length === 0) {
+  if (!module_.reviewGroup) {
     process.stderr.write(
-      `Module "${module_.name}" has no meta.components in mots.yaml; cannot search Bugzilla.\n`,
+      `Module "${module_.name}" has no meta.review_group in mots.yaml. ` +
+        `This tool's review-group + scope filter requires one — add a review_group to ` +
+        `the module's meta block, or run against a module that already declares one.\n`,
     );
     return 1;
   }
-
-  const bugzillaClient: BugzillaClient = {
-    fetchFn,
-    apiKey: env.BUGZILLA_API_KEY,
-    cache: { cacheDir: CACHE_DIR, mode: cli.cacheMode, ttlMs: HOUR_MS },
-    concurrency: Math.min(cli.concurrency, 2),
-  };
-
-  process.stderr.write(
-    `Searching Bugzilla for FIXED bugs in ${module_.bugzillaComponents.length} component(s), last ${cli.days} days...\n`,
-  );
-  const bugs = await searchFixedBugs(
-    bugzillaClient,
-    module_.bugzillaComponents,
-    cli.days,
-  );
-  process.stderr.write(`  ${bugs.length} bug(s) found.\n`);
-  if (bugs.length === 0) {
-    process.stderr.write("Nothing to do.\n");
-    return 0;
-  }
-
-  const attachmentLimit = pLimit(cli.concurrency);
-  process.stderr.write("Fetching attachments...\n");
-  const withAttachments = await Promise.all(
-    bugs.map((bug) =>
-      attachmentLimit(async () => {
-        const atts = await getAttachments(bugzillaClient, bug.id);
-        return { bug, dNumbers: extractPhabricatorDNumbers(atts) };
-      }),
-    ),
-  );
-
-  const uniqueDNumbers: DNumber[] = [];
-  const seenD = new Set<number>();
-  for (const { dNumbers } of withAttachments) {
-    for (const d of dNumbers) {
-      const n = d as unknown as number;
-      if (!seenD.has(n)) {
-        seenD.add(n);
-        uniqueDNumbers.push(d);
-      }
-    }
-  }
-  process.stderr.write(`  ${uniqueDNumbers.length} unique Phabricator revision(s).\n`);
 
   const phabricatorClient: PhabricatorClient = {
     fetchFn,
@@ -172,6 +143,128 @@ export const run = async (argv: string[]): Promise<number> => {
       );
     },
   };
+
+  let withAttachments: Array<{ bug: Bug; dNumbers: DNumber[] }> | null = null;
+  let uniqueDNumbers: DNumber[];
+  let projectInfo: ProjectInfo | null = null;
+  let groupPhid: string;
+  const seedRevisionMeta = new Map<number, Revision>();
+
+  if (cli.skipBugzilla) {
+    process.stderr.write(
+      `Resolving Phabricator review group "${module_.reviewGroup}" (with members)...\n`,
+    );
+    projectInfo = await resolveProjectInfoBySlug(
+      phabricatorClient,
+      module_.reviewGroup,
+    );
+    if (!projectInfo) {
+      process.stderr.write(
+        `  No Phabricator project matched slug "${module_.reviewGroup}". ` +
+          `Check that the slug exists on phabricator.services.mozilla.com.\n`,
+      );
+      return 1;
+    }
+    if (projectInfo.memberPHIDs.size === 0) {
+      process.stderr.write(
+        `  Phabricator review group #${module_.reviewGroup} has no members; ` +
+          `nothing to filter against.\n`,
+      );
+      return 1;
+    }
+    groupPhid = projectInfo.phid as unknown as string;
+    process.stderr.write(
+      `  Group PHID: ${groupPhid} (${projectInfo.memberPHIDs.size} member(s)).\n`,
+    );
+
+    process.stderr.write(
+      `Searching Phabricator for revisions where #${module_.reviewGroup} reviewed in the last ${cli.days} day(s)...\n`,
+    );
+    const revs = await searchRevisionsByReviewer(
+      phabricatorClient,
+      projectInfo.phid,
+      cli.days,
+    );
+    process.stderr.write(`  ${revs.length} revision(s) found.\n`);
+    if (revs.length === 0) {
+      process.stderr.write("Nothing to do.\n");
+      return 0;
+    }
+    uniqueDNumbers = revs.map((r) => r.dNumber);
+    for (const rev of revs) {
+      seedRevisionMeta.set(rev.dNumber as unknown as number, rev);
+    }
+  } else {
+    if (module_.bugzillaComponents.length === 0) {
+      process.stderr.write(
+        `Module "${module_.name}" has no meta.components in mots.yaml; cannot search Bugzilla.\n`,
+      );
+      return 1;
+    }
+
+    const bugzillaClient: BugzillaClient = {
+      fetchFn,
+      apiKey: env.BUGZILLA_API_KEY,
+      cache: { cacheDir: CACHE_DIR, mode: cli.cacheMode, ttlMs: HOUR_MS },
+      concurrency: Math.min(cli.concurrency, 2),
+    };
+
+    process.stderr.write(
+      `Searching Bugzilla for FIXED bugs in ${module_.bugzillaComponents.length} component(s), last ${cli.days} days...\n`,
+    );
+    const bugs = await searchFixedBugs(
+      bugzillaClient,
+      module_.bugzillaComponents,
+      cli.days,
+    );
+    process.stderr.write(`  ${bugs.length} bug(s) found.\n`);
+    if (bugs.length === 0) {
+      process.stderr.write("Nothing to do.\n");
+      return 0;
+    }
+
+    const attachmentLimit = pLimit(cli.concurrency);
+    process.stderr.write("Fetching attachments...\n");
+    withAttachments = await Promise.all(
+      bugs.map((bug) =>
+        attachmentLimit(async () => {
+          const atts = await getAttachments(bugzillaClient, bug.id);
+          return { bug, dNumbers: extractPhabricatorDNumbers(atts) };
+        }),
+      ),
+    );
+
+    const dn: DNumber[] = [];
+    const seenD = new Set<number>();
+    for (const { dNumbers } of withAttachments) {
+      for (const d of dNumbers) {
+        const n = d as unknown as number;
+        if (!seenD.has(n)) {
+          seenD.add(n);
+          dn.push(d);
+        }
+      }
+    }
+    uniqueDNumbers = dn;
+    process.stderr.write(`  ${uniqueDNumbers.length} unique Phabricator revision(s).\n`);
+
+    process.stderr.write(
+      `Resolving Phabricator review group "${module_.reviewGroup}"...\n`,
+    );
+    const projectMap = await resolveProjectsBySlugs(phabricatorClient, [
+      module_.reviewGroup,
+    ]);
+    const phid = projectMap.get(module_.reviewGroup);
+    if (!phid) {
+      process.stderr.write(
+        `  No Phabricator project matched slug "${module_.reviewGroup}". ` +
+          `Check that the slug exists on phabricator.services.mozilla.com.\n`,
+      );
+      return 1;
+    }
+    groupPhid = phid as unknown as string;
+    process.stderr.write(`  Group PHID: ${groupPhid}\n`);
+  }
 
   process.stderr.write("Downloading bugbug revisions artifact...\n");
   const artifact = await downloadBugbugArtifact({ cacheDir: CACHE_DIR });
@@ -198,46 +291,121 @@ export const run = async (argv: string[]): Promise<number> => {
     `  ${covered.size} covered by bugbug, ${needsLive.length} need live Phabricator fetch.\n`,
   );
 
-  const commentsByDNumber = new Map<number, RevisionComments>();
+  const bugbugComments = new Map<number, RevisionComments>();
   for (const [id, rev] of covered) {
-    commentsByDNumber.set(id, bugbugToRevisionComments(rev));
+    bugbugComments.set(id, bugbugToRevisionComments(rev));
   }
 
-  if (needsLive.length > 0) {
-    process.stderr.write("Resolving revisions via Phabricator...\n");
-    const revisionMap = await resolveRevisionsByIds(
-      phabricatorClient,
-      needsLive,
-    );
-    process.stderr.write(`  ${revisionMap.size} revision(s) resolved.\n`);
-
-    const commentLimit = pLimit(1);
-    process.stderr.write("Fetching comments...\n");
-    const commentList = await Promise.all(
-      [...revisionMap.values()].map((rev) =>
-        commentLimit(() => fetchRevisionComments(phabricatorClient, rev)),
-      ),
-    );
-    for (const rc of commentList) {
-      commentsByDNumber.set(rc.revision.dNumber as unknown as number, rc);
+  const revisionMeta = new Map<number, Revision>();
+  for (const [id, rc] of bugbugComments) {
+    revisionMeta.set(id, rc.revision);
+  }
+  for (const [id, rev] of seedRevisionMeta) {
+    if (!revisionMeta.has(id)) {
+      revisionMeta.set(id, rev);
     }
   }
 
-  const entries = withAttachments.map(({ bug, dNumbers }) => ({
-    bug,
-    revisionComments: dNumbers
-      .map((d) => commentsByDNumber.get(d as unknown as number))
-      .filter((rc): rc is RevisionComments => rc !== undefined),
-  }));
+  const needLiveMeta: DNumber[] = [];
+  for (const d of uniqueDNumbers) {
+    const id = d as unknown as number;
+    const existing = revisionMeta.get(id);
+    if (!existing || existing.reviewerPHIDs.length === 0) {
+      needLiveMeta.push(d);
+    }
+  }
+  if (needLiveMeta.length > 0) {
+    process.stderr.write(
+      `Resolving revisions via Phabricator (reviewer metadata for ${needLiveMeta.length} revision(s))...\n`,
+    );
+    const liveMap = await resolveRevisionsByIds(
+      phabricatorClient,
+      needLiveMeta,
+    );
+    for (const [, rev] of liveMap) {
+      revisionMeta.set(rev.dNumber as unknown as number, rev);
+    }
+  }
+
+  let survivingIds: DNumber[];
+  if (cli.skipBugzilla) {
+    survivingIds = uniqueDNumbers;
+  } else {
+    survivingIds = uniqueDNumbers.filter((d) => {
+      const rev = revisionMeta.get(d as unknown as number);
+      return rev !== undefined && rev.reviewerPHIDs.includes(groupPhid);
+    });
+    process.stderr.write(
+      `  ${survivingIds.length} of ${uniqueDNumbers.length} revision(s) had #${module_.reviewGroup} as a reviewer.\n`,
+    );
+  }
+
+  const survivingNeedsLive = survivingIds.filter((d) => {
+    const id = d as unknown as number;
+    return !bugbugComments.has(id);
+  });
+
+  const commentsByDNumber = new Map<number, RevisionComments>();
+  for (const d of survivingIds) {
+    const id = d as unknown as number;
+    const cached = bugbugComments.get(id);
+    if (cached) {
+      commentsByDNumber.set(id, cached);
+    }
+  }
+
+  if (survivingNeedsLive.length > 0) {
+    const commentLimit = pLimit(1);
+    process.stderr.write(
+      `Fetching comments for ${survivingNeedsLive.length} live revision(s)...\n`,
+    );
+    const commentList = await Promise.all(
+      survivingNeedsLive.map((d) =>
+        commentLimit(async () => {
+          const rev = revisionMeta.get(d as unknown as number);
+          if (!rev) {
+            return null;
+          }
+          return fetchRevisionComments(phabricatorClient, rev);
+        }),
+      ),
+    );
+    for (const rc of commentList) {
+      if (rc) {
+        commentsByDNumber.set(rc.revision.dNumber as unknown as number, rc);
+      }
+    }
+  }
+
+  if (cli.skipBugzilla && projectInfo) {
+    for (const [id, rc] of commentsByDNumber) {
+      commentsByDNumber.set(
+        id,
+        filterCommentsByAuthors(rc, projectInfo.memberPHIDs),
+      );
+    }
+  }
+
+  const entries = cli.skipBugzilla
+    ? survivingIds
+        .map((d) => commentsByDNumber.get(d as unknown as number))
+        .filter((rc): rc is RevisionComments => rc !== undefined)
+        .map((rc) => ({ bug: null, revisionComments: [rc] }))
+    : (withAttachments ?? []).map(({ bug, dNumbers }) => ({
+        bug,
+        revisionComments: dNumbers
+          .map((d) => commentsByDNumber.get(d as unknown as number))
+          .filter((rc): rc is RevisionComments => rc !== undefined),
+      }));
   const bundle = buildBundle({ module: module_, entries });
 
   process.stderr.write(
-    `Bundle stats: ${bundle.stats.bugs} bugs, ${bundle.stats.revisions} revisions, ${bundle.stats.inlineComments} inline, ${bundle.stats.generalComments} general.\n`,
+    `Bundle stats: ${bundle.stats.entries} entries, ${bundle.stats.revisions} revisions, ${bundle.stats.inlineComments} inline, ${bundle.stats.generalComments} general.\n`,
   );
 
-  if (bundle.stats.bugs === 0) {
+  if (bundle.stats.entries === 0) {
     process.stderr.write(
-      "No bugs with review comments survived filtering. Nothing to synthesize.\n",
+      "No entries with review comments survived filtering. Nothing to synthesize.\n",
     );
     return 0;
   }
