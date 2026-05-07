@@ -9,7 +9,7 @@ import type { ReviewBundle } from "../src/synthesis/bundle.ts";
 const bundle: ReviewBundle = {
   moduleHeader: "# Module: X",
   body: "Bug 1: hi\n  D1: r\n  General comments:\n  * nit",
-  stats: { bugs: 1, revisions: 1, inlineComments: 0, generalComments: 1 },
+  stats: { entries: 1, revisions: 1, inlineComments: 0, generalComments: 1 },
 };
 
 describe("synthesizeSkill", () => {

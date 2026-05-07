@@ -23,6 +23,7 @@ const module_: Module = {
   bugzillaComponents: [{ product: "Firefox", component: "Address Bar" }],
   owners: [{ bmoId: 1, name: "Alice", nick: "alice" }],
   peers: [{ bmoId: 2, name: "Bob", nick: "bob" }],
+  reviewGroup: "urlbar-reviewers",
 };
 
 const makeBug = (id: number, summary: string): Bug => ({
@@ -40,6 +41,7 @@ const makeRevision = (id: number): Revision => ({
   title: `Revision ${id}`,
   authorPHID: unsafeBrand<UserPHID>("PHID-USER-author"),
   url: `https://phab/D${id}`,
+  reviewerPHIDs: [],
 });
 
 const makeComments = (
@@ -72,7 +74,17 @@ describe("buildBundle", () => {
           bug: makeBug(1, "first"),
           revisionComments: [
             makeComments(rev1, [], []),
-            makeComments(rev2, [{ path: "a.ts", line: 1, raw: "nit" }], []),
+            makeComments(
+              rev2,
+              [
+                {
+                  path: "browser/components/urlbar/UrlbarInput.sys.mjs",
+                  line: 1,
+                  raw: "nit",
+                },
+              ],
+              [],
+            ),
           ],
         },
       ],
@@ -92,7 +104,7 @@ describe("buildBundle", () => {
         },
       ],
     });
-    expect(bundle.stats.bugs).toBe(0);
+    expect(bundle.stats.entries).toBe(0);
     expect(bundle.body.trim()).toBe("");
   });
 
@@ -104,8 +116,16 @@ describe("buildBundle", () => {
           makeComments(
             makeRevision(300),
             [
-              { path: "z.ts", line: 5, raw: "later" },
-              { path: "a.ts", line: 2, raw: "earlier" },
+              {
+                path: "browser/components/urlbar/z.sys.mjs",
+                line: 5,
+                raw: "later",
+              },
+              {
+                path: "browser/components/urlbar/a.sys.mjs",
+                line: 2,
+                raw: "earlier",
+              },
             ],
             ["big picture"],
           ),
@@ -122,10 +142,12 @@ describe("buildBundle", () => {
     const b = buildBundle({ module: module_, entries });
     expect(a.body).toBe(b.body);
     expect(a.body.indexOf("Bug 1")).toBeLessThan(a.body.indexOf("Bug 2"));
-    expect(a.body.indexOf("a.ts")).toBeLessThan(a.body.indexOf("z.ts"));
+    expect(a.body.indexOf("/a.sys.mjs")).toBeLessThan(
+      a.body.indexOf("/z.sys.mjs"),
+    );
   });
 
-  test("moduleHeader contains module scope info", () => {
+  test("moduleHeader is just the module name as a markdown H1", () => {
     const bundle = buildBundle({
       module: module_,
       entries: [
@@ -137,10 +159,10 @@ describe("buildBundle", () => {
         },
       ],
     });
-    expect(bundle.moduleHeader).toContain("URL Bar");
-    expect(bundle.moduleHeader).toContain("browser/components/urlbar");
-    expect(bundle.moduleHeader).toContain("Firefox::Address Bar");
-    expect(bundle.moduleHeader).toContain("alice");
+    expect(bundle.moduleHeader).toBe("# Module: URL Bar");
+    expect(bundle.moduleHeader).not.toContain("browser/components/urlbar");
+    expect(bundle.moduleHeader).not.toContain("alice");
+    expect(bundle.moduleHeader).not.toContain("urlbar-reviewers");
   });
 
   test("counts stats correctly", () => {
@@ -153,8 +175,16 @@ describe("buildBundle", () => {
             makeComments(
               makeRevision(100),
               [
-                { path: "a.ts", line: 1, raw: "one" },
-                { path: "b.ts", line: 2, raw: "two" },
+                {
+                  path: "browser/components/urlbar/a.sys.mjs",
+                  line: 1,
+                  raw: "one",
+                },
+                {
+                  path: "browser/components/urlbar/b.sys.mjs",
+                  line: 2,
+                  raw: "two",
+                },
               ],
               ["gen"],
             ),
@@ -163,10 +193,142 @@ describe("buildBundle", () => {
       ],
     });
     expect(bundle.stats).toEqual({
-      bugs: 1,
+      entries: 1,
       revisions: 1,
       inlineComments: 2,
       generalComments: 1,
     });
+  });
+
+  test("filters inline comments by module includes/excludes globs", () => {
+    const cssOnly: Module = {
+      ...module_,
+      includes: ["**/*.css"],
+      excludes: ["**/vendor/**"],
+    };
+    const bundle = buildBundle({
+      module: cssOnly,
+      entries: [
+        {
+          bug: makeBug(1, "mixed"),
+          revisionComments: [
+            makeComments(
+              makeRevision(100),
+              [
+                { path: "src/foo.css", line: 1, raw: "css comment" },
+                { path: "src/bar.js", line: 2, raw: "js comment" },
+                { path: "src/vendor/baz.css", line: 3, raw: "vendor css" },
+              ],
+              [],
+            ),
+          ],
+        },
+      ],
+    });
+    expect(bundle.stats.inlineComments).toBe(1);
+    expect(bundle.body).toContain("foo.css");
+    expect(bundle.body).not.toContain("bar.js");
+    expect(bundle.body).not.toContain("vendor/baz.css");
+  });
+
+  test("keeps revisions whose only signal is a general comment after scoping", () => {
+    const cssOnly: Module = {
+      ...module_,
+      includes: ["**/*.css"],
+      excludes: [],
+    };
+    const bundle = buildBundle({
+      module: cssOnly,
+      entries: [
+        {
+          bug: makeBug(1, "general only"),
+          revisionComments: [
+            makeComments(
+              makeRevision(200),
+              [{ path: "src/bar.js", line: 1, raw: "out of scope" }],
+              ["overall direction is fine"],
+            ),
+          ],
+        },
+      ],
+    });
+    expect(bundle.stats.revisions).toBe(1);
+    expect(bundle.stats.inlineComments).toBe(0);
+    expect(bundle.stats.generalComments).toBe(1);
+    expect(bundle.body).toContain("D200");
+    expect(bundle.body).not.toContain("bar.js");
+  });
+
+  test("drops revisions where every inline was filtered AND no general comments", () => {
+    const cssOnly: Module = {
+      ...module_,
+      includes: ["**/*.css"],
+      excludes: [],
+    };
+    const bundle = buildBundle({
+      module: cssOnly,
+      entries: [
+        {
+          bug: makeBug(1, "all out of scope"),
+          revisionComments: [
+            makeComments(
+              makeRevision(300),
+              [{ path: "src/bar.js", line: 1, raw: "out of scope" }],
+              [],
+            ),
+          ],
+        },
+      ],
+    });
+    expect(bundle.stats.entries).toBe(0);
+    expect(bundle.body.trim()).toBe("");
+  });
+
+  test("accepts entries with bug: null and emits revision-only output", () => {
+    const bundle = buildBundle({
+      module: module_,
+      entries: [
+        {
+          bug: null,
+          revisionComments: [
+            makeComments(
+              makeRevision(500),
+              [
+                {
+                  path: "browser/components/urlbar/x.sys.mjs",
+                  line: 1,
+                  raw: "nit",
+                },
+              ],
+              [],
+            ),
+          ],
+        },
+      ],
+    });
+    expect(bundle.body).not.toContain("Bug ");
+    expect(bundle.body).toContain("D500");
+    expect(bundle.stats.entries).toBe(1);
+  });
+
+  test("sorts null-bug entries by D-number", () => {
+    const bundle = buildBundle({
+      module: module_,
+      entries: [
+        {
+          bug: null,
+          revisionComments: [
+            makeComments(makeRevision(900), [], ["later D"]),
+          ],
+        },
+        {
+          bug: null,
+          revisionComments: [
+            makeComments(makeRevision(100), [], ["earlier D"]),
+          ],
+        },
+      ],
+    });
+    expect(bundle.body.indexOf("D100")).toBeLessThan(bundle.body.indexOf("D900"));
   });
 });

@@ -5,9 +5,9 @@ import type { ReviewBundle } from "../src/synthesis/bundle.ts";
 import type { DocBody } from "../src/sources/firefox-docs.ts";
 
 const sampleBundle: ReviewBundle = {
-  moduleHeader: "# Module: URL Bar\nPaths: browser/components/urlbar/**/*",
+  moduleHeader: "# Module: URL Bar",
   body: "Bug 1: test\n  D100: test revision\n  General comments:\n  * lgtm",
-  stats: { bugs: 1, revisions: 1, inlineComments: 0, generalComments: 1 },
+  stats: { entries: 1, revisions: 1, inlineComments: 0, generalComments: 1 },
 };
 
 describe("buildPrompt", () => {
@@ -42,10 +42,14 @@ describe("buildPrompt", () => {
   });
 
   test("system prompt defines the required skill sections", () => {
-    expect(SYSTEM_PROMPT).toContain("Module Scope");
     expect(SYSTEM_PROMPT).toContain("Standing Conventions");
     expect(SYSTEM_PROMPT).toContain("Active Campaigns");
     expect(SYSTEM_PROMPT).toContain("Checklist");
+  });
+
+  test("system prompt does not require mots-derived metadata sections", () => {
+    expect(SYSTEM_PROMPT).not.toContain("Module Scope");
+    expect(SYSTEM_PROMPT).not.toContain("Core Reviewers");
   });
 
   test("system prompt pushes abstraction over verbatim quotes", () => {
