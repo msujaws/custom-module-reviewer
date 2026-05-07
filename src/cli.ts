@@ -16,6 +16,7 @@ import { realFetcher, retryingFetcher } from "./util/real-fetcher.ts";
 import {
   fetchMotsYaml,
   resolveModule,
+  type Module,
 } from "./sources/mots.ts";
 import {
   searchFixedBugs,
@@ -52,7 +53,8 @@ const HOUR_MS = 60 * 60 * 1000;
 const CACHE_DIR = "./.cache";
 
 interface CliOptions {
-  module: string;
+  module: string | null;
+  reviewGroup: string | null;
   days: number;
   outputDir: string;
   dryRun: boolean;
@@ -65,7 +67,11 @@ export const parseOptions = (argv: string[]): CliOptions => {
   const program = new Command();
   program
     .name("custom-module-reviewer")
-    .requiredOption("--module <name>", "Module name or machine_name from mots.yaml")
+    .option("--module <name>", "Module name or machine_name from mots.yaml")
+    .option(
+      "--review-group <slug>",
+      "Phabricator review-group slug (e.g. home-newtab-reviewers). Use when no mots.yaml module declares this review_group; runs Phabricator-only with a synthetic module record.",
+    )
     .option("--days <n>", "Lookback window in days", "365")
     .option("--output-dir <path>", "Output directory", "./output")
     .option("--dry-run", "Skip the Claude synthesis step", false)
@@ -79,19 +85,48 @@ export const parseOptions = (argv: string[]): CliOptions => {
     );
   program.parse(argv);
   const opts = program.opts();
+  const module_ = (opts.module as string | undefined) ?? null;
+  const reviewGroup = (opts.reviewGroup as string | undefined) ?? null;
+  if (module_ === null && reviewGroup === null) {
+    throw new Error("Exactly one of --module or --review-group is required.");
+  }
+  if (module_ !== null && reviewGroup !== null) {
+    throw new Error("--module and --review-group are mutually exclusive.");
+  }
   const cacheMode: CacheMode = opts.cache === false
     ? "no-cache"
     : opts.refresh
       ? "refresh"
       : "normal";
   return {
-    module: opts.module,
+    module: module_,
+    reviewGroup,
     days: Number.parseInt(opts.days, 10),
     outputDir: opts.outputDir,
     dryRun: Boolean(opts.dryRun),
     cacheMode,
     concurrency: Number.parseInt(opts.concurrency, 10),
-    skipBugzilla: Boolean(opts.skipBugzilla),
+    skipBugzilla: Boolean(opts.skipBugzilla) || reviewGroup !== null,
+  };
+};
+
+const syntheticModuleFromReviewGroup = (slug: string): Module => {
+  const cleaned = slug.replace(/-reviewers$/, "");
+  const name = cleaned
+    .split("-")
+    .filter((s) => s.length > 0)
+    .map((s) => s[0]!.toUpperCase() + s.slice(1))
+    .join(" ");
+  return {
+    name: name || slug,
+    machineName: cleaned || slug,
+    description: "",
+    includes: [],
+    excludes: [],
+    bugzillaComponents: [],
+    owners: [],
+    peers: [],
+    reviewGroup: slug,
   };
 };
 
@@ -106,31 +141,40 @@ export const run = async (argv: string[]): Promise<number> => {
   });
   const cacheBase = { cacheDir: CACHE_DIR, mode: cli.cacheMode, fetchFn };
 
-  const motsCache: CacheOptions = { ...cacheBase, ttlMs: 6 * HOUR_MS };
-  process.stderr.write("Fetching mots.yaml...\n");
-  const motsDoc = await fetchMotsYaml(motsCache);
-
-  const resolved = resolveModule(motsDoc, unsafeBrand<ModuleName>(cli.module));
-  if (resolved.kind === "miss") {
+  let module_: Module;
+  if (cli.reviewGroup !== null) {
+    module_ = syntheticModuleFromReviewGroup(cli.reviewGroup);
     process.stderr.write(
-      `Module "${cli.module}" not found in mots.yaml.\nDid you mean:\n`,
+      `Using synthetic module "${module_.name}" for review group "${cli.reviewGroup}".\n`,
     );
-    for (const s of resolved.suggestions) {
-      process.stderr.write(`  - ${s}\n`);
+  } else {
+    const motsCache: CacheOptions = { ...cacheBase, ttlMs: 6 * HOUR_MS };
+    process.stderr.write("Fetching mots.yaml...\n");
+    const motsDoc = await fetchMotsYaml(motsCache);
+
+    const resolved = resolveModule(motsDoc, unsafeBrand<ModuleName>(cli.module!));
+    if (resolved.kind === "miss") {
+      process.stderr.write(
+        `Module "${cli.module}" not found in mots.yaml.\nDid you mean:\n`,
+      );
+      for (const s of resolved.suggestions) {
+        process.stderr.write(`  - ${s}\n`);
+      }
+      return 1;
     }
-    return 1;
-  }
-  const module_ = resolved.module;
-  const slug = toModuleSlug(unsafeBrand<ModuleName>(module_.name));
+    module_ = resolved.module;
 
-  if (!module_.reviewGroup) {
-    process.stderr.write(
-      `Module "${module_.name}" has no meta.review_group in mots.yaml. ` +
-        `This tool's review-group + scope filter requires one — add a review_group to ` +
-        `the module's meta block, or run against a module that already declares one.\n`,
-    );
-    return 1;
+    if (!module_.reviewGroup) {
+      process.stderr.write(
+        `Module "${module_.name}" has no meta.review_group in mots.yaml. ` +
+          `This tool's review-group + scope filter requires one — add a review_group to ` +
+          `the module's meta block, or run against a module that already declares one.\n`,
+      );
+      return 1;
+    }
   }
+  const slug = toModuleSlug(unsafeBrand<ModuleName>(module_.name));
+  const reviewGroupSlug = module_.reviewGroup!;
 
   const phabricatorClient: PhabricatorClient = {
     fetchFn,
@@ -152,22 +196,22 @@ export const run = async (argv: string[]): Promise<number> => {
 
   if (cli.skipBugzilla) {
     process.stderr.write(
-      `Resolving Phabricator review group "${module_.reviewGroup}" (with members)...\n`,
+      `Resolving Phabricator review group "${reviewGroupSlug}" (with members)...\n`,
     );
     projectInfo = await resolveProjectInfoBySlug(
       phabricatorClient,
-      module_.reviewGroup,
+      reviewGroupSlug,
     );
     if (!projectInfo) {
       process.stderr.write(
-        `  No Phabricator project matched slug "${module_.reviewGroup}". ` +
+        `  No Phabricator project matched slug "${reviewGroupSlug}". ` +
           `Check that the slug exists on phabricator.services.mozilla.com.\n`,
       );
       return 1;
     }
     if (projectInfo.memberPHIDs.size === 0) {
       process.stderr.write(
-        `  Phabricator review group #${module_.reviewGroup} has no members; ` +
+        `  Phabricator review group #${reviewGroupSlug} has no members; ` +
           `nothing to filter against.\n`,
       );
       return 1;
@@ -178,7 +222,7 @@ export const run = async (argv: string[]): Promise<number> => {
     );
 
     process.stderr.write(
-      `Searching Phabricator for revisions where #${module_.reviewGroup} reviewed in the last ${cli.days} day(s)...\n`,
+      `Searching Phabricator for revisions where #${reviewGroupSlug} reviewed in the last ${cli.days} day(s)...\n`,
     );
     const revs = await searchRevisionsByReviewer(
       phabricatorClient,
@@ -249,15 +293,15 @@ export const run = async (argv: string[]): Promise<number> => {
     process.stderr.write(`  ${uniqueDNumbers.length} unique Phabricator revision(s).\n`);
 
     process.stderr.write(
-      `Resolving Phabricator review group "${module_.reviewGroup}"...\n`,
+      `Resolving Phabricator review group "${reviewGroupSlug}"...\n`,
     );
     const projectMap = await resolveProjectsBySlugs(phabricatorClient, [
-      module_.reviewGroup,
+      reviewGroupSlug,
     ]);
-    const phid = projectMap.get(module_.reviewGroup);
+    const phid = projectMap.get(reviewGroupSlug);
     if (!phid) {
       process.stderr.write(
-        `  No Phabricator project matched slug "${module_.reviewGroup}". ` +
+        `  No Phabricator project matched slug "${reviewGroupSlug}". ` +
           `Check that the slug exists on phabricator.services.mozilla.com.\n`,
       );
       return 1;
@@ -336,7 +380,7 @@ export const run = async (argv: string[]): Promise<number> => {
       return rev !== undefined && rev.reviewerPHIDs.includes(groupPhid);
     });
     process.stderr.write(
-      `  ${survivingIds.length} of ${uniqueDNumbers.length} revision(s) had #${module_.reviewGroup} as a reviewer.\n`,
+      `  ${survivingIds.length} of ${uniqueDNumbers.length} revision(s) had #${reviewGroupSlug} as a reviewer.\n`,
     );
   }
 
